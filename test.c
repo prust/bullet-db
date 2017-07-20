@@ -20,7 +20,7 @@ char* simple_test() {
     return "a simple test";
 }
 
-char* (*tests[1])() = {&simple_test};
+char* (*tests[])() = {&simple_test};
 
 int main(int args_count, char *args[]) {
     int test_num = 0;
