@@ -1,0 +1,179 @@
+Key Ideas:
+
+* Introduce ellipsis/truncation into the API (core feature for speed)
+ - by default you get back truncated text and a boolean indication of whether it's truncated
+   (or just check final two chars to see if it's truncated)
+ - with a subsequent call to get the full text
+
+* The API is schema-less, IOW, it doesn't force you to pre-define your schema
+  - but internally there is schema and columns are implicitly added JIT as necessary
+  - it implicitly adds columns to tables as necessary (removal must be explicit)
+
+* By default, strings are truncated at 255 bytes (not necessarily chars due to UTF-8 encoding)
+  - you can tell it to truncate certain columns/properties much shorter for speed/size savings
+
+It's tempting to put all strings in a separate data file;
+I know how simple, denormed data has lots of string properties
+- and having these all at 255 bytes will bloat the file something fierce & hurt performance
+
+BUT one of the most common use-cases is iterating and displaying strings (even truncated)
+- we don't want a lot of hops or memory paging, etc, for that.
+It's up to the app/DB designers to normalize data & reduce the # of string properties
+and pick nice short truncation points where appropriate & reduce bloat.
+
+We might even support both *inline* strings & pointers to strings via "char array" vs "char pointer".
+
+
+YES! "#pragma pack"
+  - appears to be supported by all major compilers
+  - allows me to set deterministic padding for structs
+  - allows use of structs and compiler/platform-independent serialization of structs
+  - and perhaps strings can be handled nicely with char arrays instead of pointers?
+
+
+Simplifications for getting it out there quickly:
+- No re-using of removed record space
+- No vacuuming (moving existing records into removed record space)
+  - we should probably never do this, b/c it changes record keys & is rarely needed
+- Each table would be in a massive realloc()'ed space instead of in separate pages
+- Load entire DB into memory in one blocking step; serialize it one blocking step
+- Only support inline strings (not pointers to strings)
+- Don't support string overflow; all strings must fit in allotted space
+
+
+Eventual Improvements:
+- default to storing tables in 4k pages, but allow user to hint that a particular table will be "tiny"
+  - and hint at the # of records (power of 2). It would default to starting at 2 records
+  - so it would start at 2 records and realloc() to double it every time records are added
+- Preload just the tables & records you need at the moment in an async step
+- Continually serialize to disk in a separate thread
+  - in a way that's safe even against power loss (requires a separate journal file)
+
+
+---
+
+Ok, thinking some more on this recently. I wonder how much it makes sense to store child records with the parent? IOW, to ditch strict tables & allow child records to be nested. Seems like it would lead to better memory locality. More of a document-oriented approach... might be really nice. Less memory fragmentation, fewer reads/seeks, less work putting disparate stuff together repeatedly. But it means no static record size, which means things wasted space (both disk space and memory) and shuffing/moving things around. And more hops.
+
+Better to have -- at zero hops -- a static record size with all the info that'll fit there, then with one hop, the rest of the record, with variable size -- any long strings, embedded child records, etc, etc.
+
+Text search is a completely different deal & won't be covered here at all.
+
+---
+
+Another thing: to support some screens, it's difficult to know how much data to load from disk. For instance, a "dashboard" screen that shows the most recent activity for each user. Do we pull 30 days of data? It's hard to know.
+
+But this kind of thing is brilliantly and very performantly handled by MapReduce. We ought to build MapReduce into the system. This kind of materialized view will lead to excellent performance AND simplified application logic. It's great! LC doesn't like MapReduce b/c you're imposing a performance hit on all traffic in order to support one specific use-case. This is a correct assessment, but when that specific use-case is in the 80% and the perf hit is incidental, it is well worth it. MAPREDUCE IS A BEAUTIFUL PATTERN that will fit extremely well with a high-performance, extensible C-language database.
+
+---
+
+Question: we should be async with I/O... but should we be async with memory allocation? For the core API we should offload memory allocation to the client, but we'll have helpers/wrappers that will do it.
+
+---
+
+I really like the idea of overflowing strings with an ellipsis built into the data API. We can and should do the same thing with overflowing numbers. Note that a typical representation of an integer isn't that helpful once it's truncated, but numbers *can* be represented in terms of significant digits. Then it could be displayed in the UI as "About 4 years ago" or "About $4 million" for the super-fast display. Time data, in particular, could be useful -- you could record everything at millisecond precision, but only minute-precision (or day-precision) is necessary for the UI a lot of times.
+
+Note that neither of these are MVP concepts. An MVP could fly w/ exact-length strings and numbers.
+
+---
+
+$1.50 icon for logo:
+
+https://www.iconfinder.com/icons/293920/ammunition_army_bullet_shoot_icon
+
+---
+
+We will need support for sorting/ordering and sorted indexes (for instance date-based ordering). This should be pluggable or mini-module somehow, we should probably ship/default to a simple b-tree implementation in C. But performance shouldn't matter that much, since this is on the periphery, it's not used for every table's primary key. PKs and FKs are all row IDs.
+
+The more distinctive thing is the explicit (eventually async) loading into memory of certain partitions of data, including map/reduce materialized views (that must always be loaded for read/write connections). These materialized views represent the most common data queries (initial page loads, etc) -- and perhaps all data queries. These materialized views are kept up-to-date via triggers that take an array of records, but a single operation (new inserts, update existing, deletes) and a single table/entity.
+
+An ellipsis is 3 bytes (e2 80 a6), do we want to actually use them? We could instead use a single bit somewhere?
+Or both? Or make it an option? Given the desire to do zero-copy, I would say that we should actually use the 3 bytes. A future optimization might be to also use a bit/bitmask, but that's premature at this point.
+
+* * *
+
+July 19, 2017 Thoughts:
+
+BulletDB
+
+An in-memory, persistent database with map/reduce and direct access to tables and indexes
+
+One of the guiding principles is that providing direct access to tables and indexes enables users to write queries in their own client language. For simple queries, a declarative language like SQL is superior, but as queries grow more complex, the developer often finds himself fighting the DB engine's query planner and wishing he could just write the query in imperative code. Imperative code makes the performance of the queries obvious and allows the user to eliminate DRY violations in the queries by re-using helper functions.
+
+See if you can finish a core implementation in 4 days of afternoon + evening time.
+
+Do it via TDD, probably using a hacked version of minunit (http://www.jera.com/techinfo/jtns/jtn002.html). How would I hack minunit? I might put the test names in an array and iterate the array... and then switch from macros to regular functions.
+
+Also, write a c program that parses the readme and spits out a c file that tests the examples in the documentation.
+
+Core Version Features:
+- open/read/write/close files synchronously via standard C functions
+- read entire file into memory on startup, write entire file via explicit function call
+- multiple data sources is turned off, so PKs/FKs are the array indexes
+- support for CRUD
+- support generic map/reduce by supporting & iterating create/update/delete hooks for every table
+  - indexes and map/reduce state should always store struct indexes, not references to the structs themselves, as these will change on every reallocation
+- support for fixed-length (char array) and variable-length (char pointer) strings
+  - variable-length strings are persisted to a dedicated section of the file
+- support for indexing, which is built on top of the map/reduce event hooks
+  - to define an index, the user passes in an index name and a function that takes the struct and returns the value
+    - this is implemented as a sorted array with a binary search/insert (binary insert can do a block memory copy to move all later records down with one command, if there's not enough memory available for one more record then double the memory)
+  - indexes are arrays just like tables
+- search() returns the first ix that has a val greater than or equal to the passed value
+- find() returns a pointer to the first struct that has a val equal to the passed value or NULL
+- findAll(value) and between(start, end) should have start_ix and end_ix return parameters, so the client code can iterate
+  - this is more performant & idiomatic than creating and returning arrays
+
+Since table & index memory addresses aren't static, bdb_table() and bdb_index() return an index so you can do:
+
+```c
+typedef struct {
+  char* first_name;
+} Person;
+
+// define DB
+bdb db = bdb_init();
+int people = bdb_table(db, Person);
+
+Person first_psn = db[people][0];
+printf(first_psn.first_name);
+```
+
+Here's an example of iterating an index on last names and walking the foreign key to get the company name for the individual:
+
+```c
+typedef struct {
+    char* first_name;
+} Person;
+typedef struct {
+    char* company_name;
+} Company;
+
+function getName(Person psn) {
+    return psn.first_name;
+}
+
+// define DB
+bdb db = bdb_init();
+int companies = bdb_table(db, Company);
+int people = bdb_table(db, Person);
+int psn_by_name = bdb_index(db, people, getName);
+
+for (int i = 0; i < bdb_len(db, psn_by_name); i++) {
+    bdb_ix ix = psn_by_name[i];
+    char* name = ix.val;
+    Person psn = db[people][ix.id];
+    Company co;
+    if (psn.company_id)
+        co = db[companies][psn.company_id];
+    printf("%s, %s", psn.first_name, co ? co.company_name : "No Company");
+}
+
+Person first_psn = db[people][0];
+printf(first_psn.first_name);
+```
+
+
+
+Later Features:
+- constant async writing of file via libuv
+- support data from other sources by including the source ID (typically an auto-incrementing integer assigned on initial client connect) in primary/foreign keys. The user will define (via #define) how many bits/bytes of the IDs are for the source ID, the rest are for the record ID. Records from different sources will be stored in different arrays (probably dynamically allocated and doubling whenever they run out of space). The library will provide a function that will map from an ID to the record, probably by looking up the address of the array for the given client and using pointer arithmetic to get to the proper record. 
